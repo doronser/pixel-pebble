@@ -21,11 +21,23 @@
           "memoryFormat": "8Bit"
         },
         {
+          "type": "raw",
+          "name": "AVATAR_ANIM",
+          "file": "images/avatar_anim.png"
+        },
+        {
           "type": "font",
-          "name": "FONT_PIXEL_TIME_28",
+          "name": "FONT_PIXEL_TIME_32",
           "file": "fonts/pixel_time.ttf",
-          "pixelHeight": 28,
+          "pixelHeight": 32,
           "characterRegex": "[0-9:]"
+        },
+        {
+          "type": "font",
+          "name": "FONT_PIXEL_DATE_16",
+          "file": "fonts/pixel_time.ttf",
+          "pixelHeight": 16,
+          "characterRegex": "[A-Z0-9 ]"
         }
       ]
     }

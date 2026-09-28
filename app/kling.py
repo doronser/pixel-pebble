@@ -7,10 +7,10 @@ import requests
 KLING_API_KEY = os.environ.get("KLING_API_KEY", "")
 KLING_BASE_URL = "https://api-singapore.klingai.com"
 
-# One frame cropped from an open-source retro sprite sheet, used as the style
-# reference so Kling anchors to a real 8-bit game look instead of its generic
-# "pixel art" interpretation. Drop a real reference image here before demo day.
-STYLE_REFERENCE_PATH = os.path.join(os.path.dirname(__file__), "style_reference.png")
+# The watchface shows a square avatar, and the web app crops uploads square,
+# so ask for square output too. Without this Kling defaults to 16:9 and
+# reframes the subject, which pixelize then center-crops away.
+ASPECT_RATIO = "1:1"
 
 PROMPT = (
     "Redraw this exact image as 16-bit SNES/Game Boy Color style pixel art. "
@@ -33,7 +33,7 @@ MAX_GUIDANCE_LEN = 200
 
 
 def stylize(photo_path: str, output_path: str, guidance: str | None = None) -> None:
-    """Send the user's photo (+ style reference) to Kling's image-to-image
+    """Send the user's photo to Kling's image-to-image
     endpoint and save the result to output_path. Raises KlingUnavailable if
     no API key is configured, so callers can fall back to a direct-pixelize
     demo mode instead of failing the whole job.
@@ -48,13 +48,14 @@ def stylize(photo_path: str, output_path: str, guidance: str | None = None) -> N
     if guidance:
         prompt += " Additional guidance from the user: " + guidance[:MAX_GUIDANCE_LEN]
 
+    # Note: the API's image_reference field is a mode enum ("subject"/"face"),
+    # not a second image, so there's no way to pass a separate style image here.
     payload = {
         "model_name": "kling-v3",
         "prompt": prompt,
         "image": _image_to_b64(photo_path),
+        "aspect_ratio": ASPECT_RATIO,
     }
-    if os.path.exists(STYLE_REFERENCE_PATH):
-        payload["image_reference"] = _image_to_b64(STYLE_REFERENCE_PATH)
 
     headers = {"Authorization": f"Bearer {KLING_API_KEY}"}
 

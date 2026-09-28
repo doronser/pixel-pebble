@@ -1,68 +1,281 @@
 #include <pebble.h>
 
+// Layout — keep in sync with render_face_mockup() in app/pixelize.py, which
+// renders the web preview the user approves before building.
+#define STATUS_H 22
+#define AVATAR_Y 24
+#define TIME_Y 186
+// Pebble renders this font a few px higher than the glyph box suggests; this
+// offset keeps the date's top row from being clipped.
+#define DATE_Y 4
+#define LOW_BATTERY 20
+
+// Animation tuning. The sprite is drawn on a 2px grid, so motion snaps to it.
+#define BOB_PX 4
+#define BOB_MS 700
+#define REVEAL_MS 700
+
+static GColor s_accent;
+
 static Window *s_window;
+static Layer *s_status_layer;
 static BitmapLayer *s_avatar_layer;
-static GBitmap *s_avatar_bitmap;
+static Layer *s_fx_layer;
 static TextLayer *s_time_layer;
 static GFont s_time_font;
+static GFont s_date_font;
 
-static GRect s_avatar_base_frame;
-static bool s_bounce_up = false;
+// The tap animation is an APNG resource decoded frame by frame into
+// s_avatar_bitmap. Frame 0 is the plain avatar, so that doubles as the
+// resting image. If the sequence can't be loaded (e.g. low memory), fall back
+// to the static bitmap and skip the tap animation.
+static GBitmap *s_avatar_bitmap;
+static GBitmapSequence *s_sequence;
+static AppTimer *s_frame_timer;
+static int s_frames_left;
 
-static const int WIGGLE_STEPS = 6;
-static const int16_t WIGGLE_OFFSETS[] = {-4, 4, -3, 3, -1, 0};
-static bool s_wiggling = false;
-static int s_wiggle_step = 0;
-static AppTimer *s_wiggle_timer;
+static GRect s_avatar_frame;
+static int16_t s_reveal_rows;
+static Animation *s_reveal_anim;
+static Animation *s_bob_anim;
+
+static char s_time_buffer[8];
+static char s_date_buffer[12];
+static BatteryChargeState s_battery;
+static bool s_bt_connected = true;
+
+// --- Time and date -----------------------------------------------------------
 
 static void update_time(void) {
   time_t temp = time(NULL);
   struct tm *tick_time = localtime(&temp);
 
-  static char s_buffer[8];
-  strftime(s_buffer, sizeof(s_buffer), clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
-  text_layer_set_text(s_time_layer, s_buffer);
+  strftime(s_time_buffer, sizeof(s_time_buffer), clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
+  if (!clock_is_24h_style() && s_time_buffer[0] == '0') {
+    memmove(s_time_buffer, s_time_buffer + 1, sizeof(s_time_buffer) - 1);
+  }
+  text_layer_set_text(s_time_layer, s_time_buffer);
+
+  // The date font only includes [A-Z0-9 ], so upper-case the weekday.
+  strftime(s_date_buffer, sizeof(s_date_buffer), "%a %d", tick_time);
+  for (char *c = s_date_buffer; *c; c++) {
+    if (*c >= 'a' && *c <= 'z') {
+      *c -= 'a' - 'A';
+    }
+  }
+  layer_mark_dirty(s_status_layer);
 }
 
-static void apply_avatar_offset(int16_t dx, int16_t dy) {
-  GRect frame = s_avatar_base_frame;
-  frame.origin.x += dx;
+// --- Status bar: date, bluetooth, battery ------------------------------------
+
+static void draw_battery(GContext *ctx, GRect bounds) {
+  const int16_t x = bounds.size.w - 32;
+  const int16_t y = 5;
+
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_draw_rect(ctx, GRect(x, y, 24, 12));
+  graphics_draw_rect(ctx, GRect(x + 1, y + 1, 22, 10));
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, GRect(x + 24, y + 3, 2, 6), 0, GCornerNone);
+
+  const bool low = s_battery.charge_percent <= LOW_BATTERY && !s_battery.is_charging;
+  graphics_context_set_fill_color(ctx, low ? GColorRed : s_battery.is_charging ? GColorGreen : s_accent);
+  const int segments = (s_battery.charge_percent + 24) / 25;
+  for (int i = 0; i < (segments > 0 ? segments : 1); i++) {
+    graphics_fill_rect(ctx, GRect(x + 4 + i * 5, y + 4, 4, 4), 0, GCornerNone);
+  }
+
+  if (s_battery.is_charging) {
+    // Pixel lightning bolt to the left of the battery.
+    const int16_t bx = x - 12;
+    graphics_context_set_fill_color(ctx, GColorYellow);
+    graphics_fill_rect(ctx, GRect(bx + 4, y, 4, 2), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(bx + 2, y + 2, 4, 2), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(bx, y + 4, 8, 2), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(bx + 4, y + 6, 2, 2), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(bx + 2, y + 8, 2, 2), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(bx, y + 10, 2, 2), 0, GCornerNone);
+  }
+}
+
+static void status_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, s_date_buffer, s_date_font, GRect(6, DATE_Y, 110, STATUS_H),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+
+  if (!s_bt_connected) {
+    // Struck-through "BT" between the date and the battery.
+    const GRect bt = GRect(bounds.size.w - 84, DATE_Y, 34, STATUS_H);
+    graphics_context_set_text_color(ctx, GColorRed);
+    graphics_draw_text(ctx, "BT", s_date_font, bt, GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_context_set_stroke_color(ctx, GColorRed);
+    graphics_context_set_stroke_width(ctx, 2);
+    graphics_draw_line(ctx, GPoint(bt.origin.x - 2, 20), GPoint(bt.origin.x + 32, 4));
+  }
+
+  draw_battery(ctx, bounds);
+}
+
+// --- Effects overlay: startup reveal, low-battery "zzz" ----------------------
+
+static void fx_update_proc(Layer *layer, GContext *ctx) {
+  const GRect a = s_avatar_frame;
+
+  if (s_reveal_rows < a.size.h) {
+    // CRT-style boot: the avatar is uncovered top to bottom behind a bright
+    // scanline.
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, GRect(a.origin.x, a.origin.y + s_reveal_rows, a.size.w, a.size.h - s_reveal_rows),
+                       0, GCornerNone);
+    graphics_context_set_fill_color(ctx, s_accent);
+    graphics_fill_rect(ctx, GRect(a.origin.x, a.origin.y + s_reveal_rows, a.size.w, 2), 0, GCornerNone);
+    return;
+  }
+
+  if (s_battery.charge_percent <= LOW_BATTERY && !s_battery.is_charging) {
+    // The avatar is sleepy when the watch is.
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, "Z", s_date_font, GRect(a.origin.x + a.size.w - 44, a.origin.y + 24, 20, 20),
+                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+    graphics_draw_text(ctx, "Z", s_date_font, GRect(a.origin.x + a.size.w - 22, a.origin.y + 6, 20, 20),
+                       GTextOverflowModeFill, GTextAlignmentLeft, NULL);
+  }
+}
+
+// --- Animations --------------------------------------------------------------
+
+static void reveal_update(Animation *animation, const AnimationProgress progress) {
+  s_reveal_rows = (int32_t)s_avatar_frame.size.h * progress / ANIMATION_NORMALIZED_MAX;
+  s_reveal_rows &= ~1;
+  layer_mark_dirty(s_fx_layer);
+}
+
+static void reveal_stopped(Animation *animation, bool finished, void *context) {
+  s_reveal_rows = s_avatar_frame.size.h;
+  layer_mark_dirty(s_fx_layer);
+  s_reveal_anim = NULL;
+}
+
+static const AnimationImplementation s_reveal_impl = { .update = reveal_update };
+
+static void set_avatar_offset(int16_t dy) {
+  GRect frame = s_avatar_frame;
   frame.origin.y += dy;
   layer_set_frame(bitmap_layer_get_layer(s_avatar_layer), frame);
 }
 
-static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
-  update_time();
+static void bob_update(Animation *animation, const AnimationProgress progress) {
+  // One hop: up and back down over a half sine wave.
+  const int32_t angle = (TRIG_MAX_ANGLE / 2) * progress / ANIMATION_NORMALIZED_MAX;
+  const int16_t dy = (BOB_PX * sin_lookup(angle)) / TRIG_MAX_RATIO;
+  set_avatar_offset(-(dy & ~1));
+}
 
-  // Free "breathing" cue: nudge the avatar 2px up/down each minute. No new
-  // timers, still driven entirely off the battery-safe MINUTE_UNIT tick.
-  s_bounce_up = !s_bounce_up;
-  if (!s_wiggling) {
-    apply_avatar_offset(0, s_bounce_up ? -2 : 2);
+static void bob_stopped(Animation *animation, bool finished, void *context) {
+  set_avatar_offset(0);
+  s_bob_anim = NULL;
+}
+
+static const AnimationImplementation s_bob_impl = { .update = bob_update };
+
+static void start_bob(void) {
+  if (s_bob_anim || s_reveal_anim) {
+    return;
+  }
+  s_bob_anim = animation_create();
+  animation_set_duration(s_bob_anim, BOB_MS);
+  animation_set_curve(s_bob_anim, AnimationCurveEaseInOut);
+  animation_set_implementation(s_bob_anim, &s_bob_impl);
+  animation_set_handlers(s_bob_anim, (AnimationHandlers) { .stopped = bob_stopped }, NULL);
+  animation_schedule(s_bob_anim);
+}
+
+static void start_reveal(void) {
+  s_reveal_rows = 0;
+  s_reveal_anim = animation_create();
+  animation_set_duration(s_reveal_anim, REVEAL_MS);
+  animation_set_curve(s_reveal_anim, AnimationCurveLinear);
+  animation_set_implementation(s_reveal_anim, &s_reveal_impl);
+  animation_set_handlers(s_reveal_anim, (AnimationHandlers) { .stopped = reveal_stopped }, NULL);
+  animation_schedule(s_reveal_anim);
+}
+
+static void frame_timer_callback(void *data) {
+  s_frame_timer = NULL;
+  uint32_t delay_ms = 0;
+  if (s_frames_left <= 0 || !gbitmap_sequence_update_bitmap_next_frame(s_sequence, s_avatar_bitmap, &delay_ms)) {
+    return;
+  }
+  s_frames_left--;
+  layer_mark_dirty(bitmap_layer_get_layer(s_avatar_layer));
+  if (s_frames_left > 0) {
+    s_frame_timer = app_timer_register(delay_ms, frame_timer_callback, NULL);
   }
 }
 
-static void wiggle_timer_callback(void *data) {
-  if (s_wiggle_step >= WIGGLE_STEPS) {
-    s_wiggling = false;
-    apply_avatar_offset(0, s_bounce_up ? -2 : 2);  // settle back to the current breathing offset
+static void play_sequence(void) {
+  if (!s_sequence || s_frame_timer) {
     return;
   }
+  gbitmap_sequence_restart(s_sequence);
+  s_frames_left = gbitmap_sequence_get_total_num_frames(s_sequence);
+  s_frame_timer = app_timer_register(0, frame_timer_callback, NULL);
+}
 
-  apply_avatar_offset(WIGGLE_OFFSETS[s_wiggle_step], s_bounce_up ? -2 : 2);
-  s_wiggle_step++;
-  s_wiggle_timer = app_timer_register(120, wiggle_timer_callback, NULL);
+// --- Event handlers ----------------------------------------------------------
+
+static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
+  update_time();
+  start_bob();
 }
 
 static void tap_handler(AccelAxisType axis, int32_t direction) {
   // Watchfaces have no buttons — accelerometer tap is the one sanctioned
-  // input, so a wrist-flick plays a quick wiggle then settles back down.
-  if (s_wiggling) {
+  // input, so a wrist-flick plays the shine/sparkle sequence and a hop.
+  if (s_reveal_anim) {
     return;
   }
-  s_wiggling = true;
-  s_wiggle_step = 0;
-  s_wiggle_timer = app_timer_register(0, wiggle_timer_callback, NULL);
+  play_sequence();
+  start_bob();
+}
+
+static void battery_handler(BatteryChargeState state) {
+  s_battery = state;
+  layer_mark_dirty(s_status_layer);
+  layer_mark_dirty(s_fx_layer);
+}
+
+static void bluetooth_handler(bool connected) {
+  if (s_bt_connected && !connected) {
+    vibes_double_pulse();
+  }
+  s_bt_connected = connected;
+  layer_mark_dirty(s_status_layer);
+}
+
+// --- Window ------------------------------------------------------------------
+
+static void load_avatar(void) {
+  s_sequence = gbitmap_sequence_create_with_resource(RESOURCE_ID_AVATAR_ANIM);
+  if (s_sequence) {
+    s_avatar_bitmap = gbitmap_create_blank(gbitmap_sequence_get_bitmap_size(s_sequence), GBitmapFormat8Bit);
+    uint32_t delay_ms;
+    if (s_avatar_bitmap && gbitmap_sequence_update_bitmap_next_frame(s_sequence, s_avatar_bitmap, &delay_ms)) {
+      return;
+    }
+    APP_LOG(APP_LOG_LEVEL_WARNING, "avatar animation unavailable, using static image");
+    if (s_avatar_bitmap) {
+      gbitmap_destroy(s_avatar_bitmap);
+    }
+    // Deliberately not gbitmap_sequence_destroy(): after a failed decode the
+    // firmware has already freed the sequence's internals, and destroying it
+    // again faults the app with a double free. Leaking it once is harmless.
+    s_sequence = NULL;
+  }
+  s_avatar_bitmap = gbitmap_create_with_resource(RESOURCE_ID_AVATAR_IMAGE);
 }
 
 static void main_window_load(Window *window) {
@@ -71,42 +284,60 @@ static void main_window_load(Window *window) {
 
   window_set_background_color(window, GColorBlack);
 
-  s_avatar_bitmap = gbitmap_create_with_resource(RESOURCE_ID_AVATAR_IMAGE);
+  s_time_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_PIXEL_TIME_32));
+  s_date_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_PIXEL_DATE_16));
+
+  s_status_layer = layer_create(GRect(0, 0, bounds.size.w, STATUS_H));
+  layer_set_update_proc(s_status_layer, status_update_proc);
+  layer_add_child(window_layer, s_status_layer);
+
+  load_avatar();
   GRect avatar_bounds = gbitmap_get_bounds(s_avatar_bitmap);
-  s_avatar_base_frame = GRect((bounds.size.w - avatar_bounds.size.w) / 2, 12,
-                               avatar_bounds.size.w, avatar_bounds.size.h);
-  s_avatar_layer = bitmap_layer_create(s_avatar_base_frame);
+  s_avatar_frame = GRect((bounds.size.w - avatar_bounds.size.w) / 2, AVATAR_Y,
+                         avatar_bounds.size.w, avatar_bounds.size.h);
+  s_avatar_layer = bitmap_layer_create(s_avatar_frame);
   bitmap_layer_set_bitmap(s_avatar_layer, s_avatar_bitmap);
-  bitmap_layer_set_compositing_mode(s_avatar_layer, GCompOpSet);
   layer_add_child(window_layer, bitmap_layer_get_layer(s_avatar_layer));
 
-  GRect time_frame = GRect(0, s_avatar_base_frame.origin.y + s_avatar_base_frame.size.h + 14,
-                            bounds.size.w, 34);
-  s_time_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_PIXEL_TIME_28));
-  s_time_layer = text_layer_create(time_frame);
+  s_fx_layer = layer_create(bounds);
+  layer_set_update_proc(s_fx_layer, fx_update_proc);
+  layer_add_child(window_layer, s_fx_layer);
+
+  s_time_layer = text_layer_create(GRect(0, TIME_Y, bounds.size.w, bounds.size.h - TIME_Y));
   text_layer_set_background_color(s_time_layer, GColorClear);
-  text_layer_set_text_color(s_time_layer, {{TIME_COLOR}});
+  text_layer_set_text_color(s_time_layer, s_accent);
   text_layer_set_font(s_time_layer, s_time_font);
   text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
   layer_add_child(window_layer, text_layer_get_layer(s_time_layer));
 
-  accel_tap_service_subscribe(tap_handler);
-
+  s_battery = battery_state_service_peek();
+  s_bt_connected = connection_service_peek_pebble_app_connection();
   update_time();
+  start_reveal();
 }
 
 static void main_window_unload(Window *window) {
-  if (s_wiggle_timer) {
-    app_timer_cancel(s_wiggle_timer);
-    s_wiggle_timer = NULL;
+  animation_unschedule_all();
+  if (s_frame_timer) {
+    app_timer_cancel(s_frame_timer);
+    s_frame_timer = NULL;
   }
   text_layer_destroy(s_time_layer);
-  fonts_unload_custom_font(s_time_font);
+  layer_destroy(s_fx_layer);
   bitmap_layer_destroy(s_avatar_layer);
+  layer_destroy(s_status_layer);
+  if (s_sequence) {
+    gbitmap_sequence_destroy(s_sequence);
+    s_sequence = NULL;
+  }
   gbitmap_destroy(s_avatar_bitmap);
+  fonts_unload_custom_font(s_time_font);
+  fonts_unload_custom_font(s_date_font);
 }
 
 static void init(void) {
+  s_accent = {{ACCENT_COLOR}};
+
   s_window = window_create();
   window_set_window_handlers(s_window, (WindowHandlers) {
     .load = main_window_load,
@@ -115,9 +346,16 @@ static void init(void) {
   window_stack_push(s_window, true);
 
   tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
+  accel_tap_service_subscribe(tap_handler);
+  battery_state_service_subscribe(battery_handler);
+  connection_service_subscribe((ConnectionHandlers) {
+    .pebble_app_connection_handler = bluetooth_handler,
+  });
 }
 
 static void deinit(void) {
+  connection_service_unsubscribe();
+  battery_state_service_unsubscribe();
   accel_tap_service_unsubscribe();
   tick_timer_service_unsubscribe();
   window_destroy(s_window);

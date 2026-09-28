@@ -18,7 +18,7 @@ const GENERATING_MESSAGES = [
 const BUILDING_MESSAGES = [
   "Compiling for Pebble Time 2...",
   "Packing pixels into a .pbw...",
-  "Snapping a screenshot...",
+  "Teaching your sprite to dance...",
 ];
 
 export default function JobPage({ params }: { params: Promise<{ id: string }> }) {
@@ -26,11 +26,24 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
   const [phase, setPhase] = useState<Phase>("generating");
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [cacheBust, setCacheBust] = useState(0);
+  const [guidance, setGuidance] = useState("");
+
+  useEffect(() => {
+    fetch(`/api/jobs/${id}/meta`)
+      .then((res) => (res.ok ? res.json() : {}))
+      .then((meta: { guidance?: string }) => setGuidance(meta.guidance ?? ""))
+      .catch(() => {});
+  }, [id]);
 
   useEffect(() => {
     if (phase !== "generating") return;
     const interval = setInterval(async () => {
       const res = await fetch(`/api/jobs/${id}/avatar-status`);
+      if (!res.ok) {
+        setErrorMessage("This job doesn't exist (anymore).");
+        setPhase("avatar-error");
+        return;
+      }
       const data = await res.json();
       if (data.state === "ready") {
         setPhase("review");
@@ -60,7 +73,11 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
 
   async function confirmAvatar() {
     setPhase("building");
-    await fetch(`/api/jobs/${id}/build`, { method: "POST" });
+    const res = await fetch(`/api/jobs/${id}/build`, { method: "POST" }).catch(() => null);
+    if (!res?.ok) {
+      setErrorMessage("Couldn't start the build — try again.");
+      setPhase("build-error");
+    }
   }
 
   if (phase === "generating") {
@@ -82,9 +99,13 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
 
   if (phase === "review") {
     return (
-      <ScreenCard stepLabel="STEP 2 · REVIEW" title="PIXEL PEBBLE" tagline="here's your pixel avatar!">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={`/api/jobs/${id}/preview.png`} alt="Your pixel avatar" className={styles.avatarFrame} />
+      <ScreenCard stepLabel="STEP 2 · REVIEW" title="PIXEL PEBBLE" tagline="here's your watchface!">
+        <div className={styles.watchFrame}>
+          {/* Animated preview: the shine/sparkle plays on the watch when you flick your wrist. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={`/api/jobs/${id}/screenshot.png`} alt="Your watchface preview" />
+        </div>
+        <div className={styles.cropHint}>flick your wrist to make it sparkle ✨</div>
         <PixelButton onClick={confirmAvatar}>✓ LOOKS GREAT</PixelButton>
         <PixelButton variant="secondary" onClick={() => setPhase("try-again")}>
           ↻ TRY AGAIN
@@ -95,11 +116,17 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
 
   if (phase === "try-again") {
     return (
-      <ScreenCard stepLabel="STEP 2 · RETRY" title="PIXEL PEBBLE" tagline="pick a photo and/or tweak the guidance">
+      <ScreenCard stepLabel="STEP 2 · RETRY" title="PIXEL PEBBLE" tagline="tweak the guidance and/or pick a new photo">
         <UploadForm
+          key={guidance}
           submitLabel="▶ REGENERATE"
+          sourceJobId={id}
+          initialGuidance={guidance}
           onJobCreated={(newId) => (window.location.href = `/jobs/${newId}`)}
         />
+        <PixelButton variant="ghost" onClick={() => setPhase("review")}>
+          ← back to this avatar
+        </PixelButton>
       </ScreenCard>
     );
   }
