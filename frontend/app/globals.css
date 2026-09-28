@@ -1,0 +1,63 @@
+:root {
+  --bg: #0b0620;
+  --panel: #150c34;
+  --panel-edge: #2e1a63;
+  --pink: #ff2e88;
+  --cyan: #2ee6ff;
+  --yellow: #ffe74c;
+  --lime: #39ff14;
+  --text: #e9e6f7;
+  --dim: #9187c4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-vt323), monospace;
+  font-size: 22px;
+  line-height: 1.4;
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.02) 0px,
+    rgba(255, 255, 255, 0.02) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.pixel-font {
+  font-family: var(--font-press-start), monospace;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 32px 16px;
+}
+
+a {
+  color: var(--cyan);
+}
+
+button {
+  font: inherit;
+}
+
+img {
+  image-rendering: pixelated;
+}

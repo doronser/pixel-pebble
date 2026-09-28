@@ -24,6 +24,17 @@ while true; do
       pbw_file="$(find "${job_dir}/build" -maxdepth 1 -iname '*.pbw' | head -n1)"
       if [ -n "$pbw_file" ]; then
         cp "$pbw_file" "${out_dir}/watchface.pbw"
+
+        # An emulator-screenshot preview was attempted here but dropped:
+        # activating a freshly installed watchface requires navigating past
+        # a "set as active?" confirmation screen, and the required button
+        # sequence proved reliable in isolated one-off containers but
+        # unreliable in this long-running service (root cause not fully
+        # pinned down; not worth the risk of shipping a preview that
+        # sometimes shows the wrong screen). The flat pixelized avatar
+        # (preview.png) is used as the "done" preview instead — it's
+        # accurate to what's on the resources, just not a live device photo.
+
         echo "{\"state\": \"done\"}" > "${out_dir}/status.json"
         echo "Job ${job_id} done."
       else

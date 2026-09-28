@@ -29,17 +29,28 @@ def _image_to_b64(path: str) -> str:
         return base64.b64encode(f.read()).decode("ascii")
 
 
-def stylize(photo_path: str, output_path: str) -> None:
+MAX_GUIDANCE_LEN = 200
+
+
+def stylize(photo_path: str, output_path: str, guidance: str | None = None) -> None:
     """Send the user's photo (+ style reference) to Kling's image-to-image
     endpoint and save the result to output_path. Raises KlingUnavailable if
     no API key is configured, so callers can fall back to a direct-pixelize
-    demo mode instead of failing the whole job."""
+    demo mode instead of failing the whole job.
+
+    guidance is optional free text from the user (e.g. "make me a wizard"),
+    appended as an additional instruction rather than replacing the base
+    prompt — so it can't accidentally undo the "preserve the subject" fix."""
     if not KLING_API_KEY:
         raise KlingUnavailable("KLING_API_KEY not set")
 
+    prompt = PROMPT
+    if guidance:
+        prompt += " Additional guidance from the user: " + guidance[:MAX_GUIDANCE_LEN]
+
     payload = {
         "model_name": "kling-v3",
-        "prompt": PROMPT,
+        "prompt": prompt,
         "image": _image_to_b64(photo_path),
     }
     if os.path.exists(STYLE_REFERENCE_PATH):
