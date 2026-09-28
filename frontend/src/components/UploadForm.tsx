@@ -62,7 +62,7 @@ export default function UploadForm({
             </div>
           </>
         )}
-        <input type="file" accept="image/*" capture="environment" onChange={handleFileChange} />
+        <input type="file" accept="image/*" onChange={handleFileChange} />
       </label>
 
       <label className={styles.fieldLabel} htmlFor="guidance">
