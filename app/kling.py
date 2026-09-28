@@ -13,9 +13,10 @@ KLING_BASE_URL = "https://api-singapore.klingai.com"
 STYLE_REFERENCE_PATH = os.path.join(os.path.dirname(__file__), "style_reference.png")
 
 PROMPT = (
-    "16-bit SNES/Game Boy Color style pixel art character sprite portrait, "
-    "front-facing, simple flat pose, limited retro color palette, "
-    "solid plain background, match the reference sprite's art style"
+    "Redraw this exact image as 16-bit SNES/Game Boy Color style pixel art. "
+    "Preserve the same subject, composition, and framing as the source "
+    "photo — do not invent a different subject. Use a limited retro color "
+    "palette and crisp pixel-art shading."
 )
 
 
