@@ -1,0 +1,33 @@
+{
+  "name": "{{NAME}}",
+  "author": "pebble-avatar",
+  "version": "1.0.0",
+  "keywords": ["pebble-app"],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "{{DISPLAY_NAME}}",
+    "uuid": "{{UUID}}",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": ["emery"],
+    "watchapp": { "watchface": true },
+    "resources": {
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "AVATAR_IMAGE",
+          "file": "images/avatar.png",
+          "memoryFormat": "8Bit"
+        },
+        {
+          "type": "font",
+          "name": "FONT_PIXEL_TIME_28",
+          "file": "fonts/pixel_time.ttf",
+          "pixelHeight": 28,
+          "characterRegex": "[0-9:]"
+        }
+      ]
+    }
+  }
+}

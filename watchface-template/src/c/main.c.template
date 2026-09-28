@@ -1,0 +1,130 @@
+#include <pebble.h>
+
+static Window *s_window;
+static BitmapLayer *s_avatar_layer;
+static GBitmap *s_avatar_bitmap;
+static TextLayer *s_time_layer;
+static GFont s_time_font;
+
+static GRect s_avatar_base_frame;
+static bool s_bounce_up = false;
+
+static const int WIGGLE_STEPS = 6;
+static const int16_t WIGGLE_OFFSETS[] = {-4, 4, -3, 3, -1, 0};
+static bool s_wiggling = false;
+static int s_wiggle_step = 0;
+static AppTimer *s_wiggle_timer;
+
+static void update_time(void) {
+  time_t temp = time(NULL);
+  struct tm *tick_time = localtime(&temp);
+
+  static char s_buffer[8];
+  strftime(s_buffer, sizeof(s_buffer), clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
+  text_layer_set_text(s_time_layer, s_buffer);
+}
+
+static void apply_avatar_offset(int16_t dx, int16_t dy) {
+  GRect frame = s_avatar_base_frame;
+  frame.origin.x += dx;
+  frame.origin.y += dy;
+  layer_set_frame(bitmap_layer_get_layer(s_avatar_layer), frame);
+}
+
+static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
+  update_time();
+
+  // Free "breathing" cue: nudge the avatar 2px up/down each minute. No new
+  // timers, still driven entirely off the battery-safe MINUTE_UNIT tick.
+  s_bounce_up = !s_bounce_up;
+  if (!s_wiggling) {
+    apply_avatar_offset(0, s_bounce_up ? -2 : 2);
+  }
+}
+
+static void wiggle_timer_callback(void *data) {
+  if (s_wiggle_step >= WIGGLE_STEPS) {
+    s_wiggling = false;
+    apply_avatar_offset(0, s_bounce_up ? -2 : 2);  // settle back to the current breathing offset
+    return;
+  }
+
+  apply_avatar_offset(WIGGLE_OFFSETS[s_wiggle_step], s_bounce_up ? -2 : 2);
+  s_wiggle_step++;
+  s_wiggle_timer = app_timer_register(120, wiggle_timer_callback, NULL);
+}
+
+static void tap_handler(AccelAxisType axis, int32_t direction) {
+  // Watchfaces have no buttons — accelerometer tap is the one sanctioned
+  // input, so a wrist-flick plays a quick wiggle then settles back down.
+  if (s_wiggling) {
+    return;
+  }
+  s_wiggling = true;
+  s_wiggle_step = 0;
+  s_wiggle_timer = app_timer_register(0, wiggle_timer_callback, NULL);
+}
+
+static void main_window_load(Window *window) {
+  Layer *window_layer = window_get_root_layer(window);
+  GRect bounds = layer_get_bounds(window_layer);
+
+  window_set_background_color(window, GColorBlack);
+
+  s_avatar_bitmap = gbitmap_create_with_resource(RESOURCE_ID_AVATAR_IMAGE);
+  GRect avatar_bounds = gbitmap_get_bounds(s_avatar_bitmap);
+  s_avatar_base_frame = GRect((bounds.size.w - avatar_bounds.size.w) / 2, 12,
+                               avatar_bounds.size.w, avatar_bounds.size.h);
+  s_avatar_layer = bitmap_layer_create(s_avatar_base_frame);
+  bitmap_layer_set_bitmap(s_avatar_layer, s_avatar_bitmap);
+  bitmap_layer_set_compositing_mode(s_avatar_layer, GCompOpSet);
+  layer_add_child(window_layer, bitmap_layer_get_layer(s_avatar_layer));
+
+  GRect time_frame = GRect(0, s_avatar_base_frame.origin.y + s_avatar_base_frame.size.h + 14,
+                            bounds.size.w, 34);
+  s_time_font = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_PIXEL_TIME_28));
+  s_time_layer = text_layer_create(time_frame);
+  text_layer_set_background_color(s_time_layer, GColorClear);
+  text_layer_set_text_color(s_time_layer, {{TIME_COLOR}});
+  text_layer_set_font(s_time_layer, s_time_font);
+  text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
+  layer_add_child(window_layer, text_layer_get_layer(s_time_layer));
+
+  accel_tap_service_subscribe(tap_handler);
+
+  update_time();
+}
+
+static void main_window_unload(Window *window) {
+  if (s_wiggle_timer) {
+    app_timer_cancel(s_wiggle_timer);
+    s_wiggle_timer = NULL;
+  }
+  text_layer_destroy(s_time_layer);
+  fonts_unload_custom_font(s_time_font);
+  bitmap_layer_destroy(s_avatar_layer);
+  gbitmap_destroy(s_avatar_bitmap);
+}
+
+static void init(void) {
+  s_window = window_create();
+  window_set_window_handlers(s_window, (WindowHandlers) {
+    .load = main_window_load,
+    .unload = main_window_unload,
+  });
+  window_stack_push(s_window, true);
+
+  tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
+}
+
+static void deinit(void) {
+  accel_tap_service_unsubscribe();
+  tick_timer_service_unsubscribe();
+  window_destroy(s_window);
+}
+
+int main(void) {
+  init();
+  app_event_loop();
+  deinit();
+}

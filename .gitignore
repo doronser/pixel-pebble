@@ -1,0 +1,9 @@
+.env
+uploads/
+storage/
+build-queue/
+phase0-test/
+reference/
+__pycache__/
+*.pyc
+.DS_Store
